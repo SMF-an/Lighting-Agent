@@ -252,9 +252,9 @@ def generate_gradient_image(width, height, rng):
 
 def main():
     num_images = 5
-    width = 1920
-    height = 1080
-    output_dir = Path("data/trial/images")
+    width = 768
+    height = 768
+    output_dir = Path("../../data/trial/images")
     seed = 42
 
     output_dir.mkdir(parents=True, exist_ok=True)

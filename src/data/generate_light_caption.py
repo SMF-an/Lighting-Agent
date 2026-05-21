@@ -1,4 +1,3 @@
-import argparse
 import base64
 import json
 import mimetypes
@@ -105,24 +104,9 @@ def export_captions(image_dir, output_path):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Module 2: Build image-caption pairs with Qwen-VL")
-    parser.add_argument(
-        "--image-dir",
-        default="data/trial/images",
-        help="Directory containing lighting images",
-    )
-    parser.add_argument(
-        "--output",
-        default="data/trial/light_effect_captions.jsonl",
-        help="Output JSONL path",
-    )
-    args = parser.parse_args()
 
-    image_dir = Path(args.image_dir)
-    output_path = Path(args.output)
-
-    if not image_dir.exists():
-        raise FileNotFoundError(f"Image directory not found: {image_dir}")
+    image_dir = Path("../../data/trial/images")
+    output_path = Path("../../data/trial/light_effect_captions.jsonl")
 
     total = export_captions(image_dir, output_path)
     print(f"Done. Wrote {total} caption records to {output_path}")

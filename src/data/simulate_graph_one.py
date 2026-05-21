@@ -1,9 +1,9 @@
-import argparse
 import colorsys
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
+
 
 def random_rgb(rng, sat_min=0.55, sat_max=0.9, val_min=0.8, val_max=1.0):
     h = rng.random()
@@ -11,6 +11,7 @@ def random_rgb(rng, sat_min=0.55, sat_max=0.9, val_min=0.8, val_max=1.0):
     v = rng.uniform(val_min, val_max)
     r, g, b = colorsys.hsv_to_rgb(h, s, v)
     return np.array([r * 255, g * 255, b * 255], dtype=np.float32), h
+
 
 def random_color_pair(rng):
     left, h1 = random_rgb(rng)
@@ -25,7 +26,10 @@ def random_color_pair(rng):
 
     return left, right
 
-def generate_gradient_image(width, height, left_color, right_color, rng):
+
+def generate_image(width, height, rng):
+    left_color, right_color = random_color_pair(rng)
+    
     x = np.linspace(0, 1, width, dtype=np.float32)
     t = x[None, :, None]
     # 横向线性渐变
@@ -47,14 +51,14 @@ def generate_gradient_image(width, height, left_color, right_color, rng):
     img = img * vignette
 
     img = np.clip(img, 0, 255).astype(np.uint8)
-    return img
+    return img, left_color, right_color
+
 
 def main():
-
-    num_images = 50
-    width = 1920
-    height = 1080
-    output_dir = "data/trial/images"
+    num_images = 5
+    width = 768
+    height = 768
+    output_dir = "../../data/trial/images"
     seed = 42
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -62,12 +66,9 @@ def main():
     rng = np.random.default_rng(seed)
 
     for i in range(1, num_images + 1):
-        left_color, right_color = random_color_pair(rng)
-        img = generate_gradient_image(
+        img, left_color, right_color = generate_image(
             width=width,
             height=height,
-            left_color=left_color,
-            right_color=right_color,
             rng=rng,
         )
 
@@ -79,6 +80,7 @@ def main():
         print(f"[{i:04d}] saved: {save_path} | left={left_int} right={right_int}")
 
     print(f"完成，共生成 {num_images} 张图片，目录: {output_dir}")
+
 
 if __name__ == "__main__":
     main()
