@@ -117,7 +117,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--source-dir",
-        default="../data",
+        default="../../data",
         help="Local dataset folder to upload (contains images/ and light_effect_captions.jsonl).",
     )
     args = parser.parse_args()

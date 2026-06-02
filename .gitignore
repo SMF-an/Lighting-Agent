@@ -1,6 +1,7 @@
 /data/
 /result/
 /runs/
+report/
 *.pptx
 src/.env
 __pycache__

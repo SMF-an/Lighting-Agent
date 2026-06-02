@@ -1,40 +1,43 @@
 import argparse
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
-from datetime import datetime
+import sys
+import textwrap
+
 import matplotlib.pyplot as plt
 import torch
-from diffusers import DiffusionPipeline, DDIMScheduler
-from peft import get_peft_model, LoraConfig
-import textwrap
 import torch.nn as nn
+from diffusers import DDIMScheduler, StableDiffusionPipeline
+from peft import LoraConfig, PeftModel, get_peft_model
 from tqdm.auto import tqdm
+
+PROJECT_SRC = Path(__file__).resolve().parents[1]
+if str(PROJECT_SRC) not in sys.path:
+    sys.path.insert(0, str(PROJECT_SRC))
 
 from data.dataset import build_train_dataloader
 
 
-def setup_sdxl_lora(base_model_id, lora_rank=32, lora_alpha=32, lora_dropout=0.1):
+def setup_sd15_lora(base_model_id: str, lora_rank: int = 32, lora_alpha: int = 32, lora_dropout: float = 0.1):
     """
-    Load SDXL base model and apply LoRA configuration.
-    
-    Args:
-        base_model_id: HuggingFace model ID (e.g., "stabilityai/stable-diffusion-xl-base-1.0")
-        lora_rank: LoRA rank
-        lora_alpha: LoRA scaling factor
-        lora_dropout: LoRA dropout
-    
-    Returns:
-        pipeline with LoRA-enabled UNet
+    Load Stable Diffusion v1.5 and apply LoRA to the UNet.
     """
-    print(f"Loading base model: {base_model_id}")
-    
-    pipeline = DiffusionPipeline.from_pretrained(
+    print(f"Loading base model (SD1.5 LoRA): {base_model_id}")
+
+    train_dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else (
+        torch.float16 if torch.cuda.is_available() else torch.float32
+    )
+
+    pipeline = StableDiffusionPipeline.from_pretrained(
         base_model_id,
-        torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-        variant="fp16" if torch.cuda.is_available() else None,
+        torch_dtype=train_dtype,
+        safety_checker=None,
+        requires_safety_checker=False,
+        variant="fp16" if train_dtype == torch.float16 else None,
     )
     pipeline.scheduler = DDIMScheduler.from_config(pipeline.scheduler.config)
-    
+
     lora_config = LoraConfig(
         r=lora_rank,
         lora_alpha=lora_alpha,
@@ -42,13 +45,10 @@ def setup_sdxl_lora(base_model_id, lora_rank=32, lora_alpha=32, lora_dropout=0.1
         lora_dropout=lora_dropout,
         bias="none",
     )
-    
-    unet = pipeline.unet
-    unet = get_peft_model(unet, lora_config)
+
+    unet = get_peft_model(pipeline.unet, lora_config)
     unet.print_trainable_parameters()
-    
     pipeline.unet = unet
-    
     return pipeline
 
 
@@ -71,16 +71,17 @@ def save_loss_curve(loss_history, output_dir):
     plt.close()
 
 
-def generate_samples(pipeline, prompts, num_inference_steps=25, guidance_scale=7.0):
+def generate_samples(pipeline, prompts, negative_prompt="furniture, sofa, chair, table, desk, room, indoor, objects, scene", num_inference_steps=25, guidance_scale=7.0):
     generated_images = []
     for prompt in prompts:
         with torch.no_grad():
             result = pipeline(
                 prompt=prompt,
+                negative_prompt=negative_prompt,
                 num_inference_steps=num_inference_steps,
                 guidance_scale=guidance_scale,
-                height=768,
-                width=768,
+                height=512,
+                width=512,
             )
 
         generated_images.append((result.images[0], prompt))
@@ -94,7 +95,7 @@ def save_samples(images, output_dir, global_step):
 
     sample_dir = Path(output_dir) / "samples"
     sample_dir.mkdir(parents=True, exist_ok=True)
-    
+
     cols = min(len(images), 4)
     rows = (len(images) + cols - 1) // cols
     fig, axes = plt.subplots(rows, cols, figsize=(4 * cols, 4 * rows))
@@ -152,7 +153,6 @@ def save_checkpoint(
     torch.save(checkpoint, checkpoint_dir / "trainer_state.pt")
 
     print(f"Saved checkpoint to {checkpoint_dir}")
-
     return checkpoint_dir
 
 
@@ -166,10 +166,7 @@ def resume_from_checkpoint(path, model, optimizer, device):
     if not trainer_state_path.exists():
         raise FileNotFoundError(f"Missing trainer state file: {trainer_state_path}")
 
-    # Load LoRA adapter weights into the existing PEFT-wrapped UNet.
-    from peft import PeftModel
-
-    loaded_model = PeftModel.from_pretrained(model, adapter_dir)
+    loaded_model = PeftModel.from_pretrained(model, adapter_dir, is_trainable=True)
     model.load_state_dict(loaded_model.state_dict(), strict=False)
 
     trainer_state = torch.load(trainer_state_path, map_location=device)
@@ -194,36 +191,24 @@ def prepare_training_batch(batch, device):
     pixel_values = batch["pixel_values"].to(device, dtype=torch.float16 if device == "cuda" else torch.float32)
     captions = batch.get("captions")
     if captions is None:
-        raise KeyError("Batch is missing 'captions'. The dataset/collate function must return raw captions for SDXL conditioning.")
+        raise KeyError("Batch is missing 'captions'. The dataset/collate function must return raw captions.")
     return pixel_values, captions
 
 
-def build_sdxl_added_conditions(pipeline, captions, pixel_values, device):
-    if not hasattr(pipeline, "encode_prompt"):
-        raise AttributeError("The loaded pipeline does not provide encode_prompt, which is required for SDXL training.")
-
-    batch_size, _, height, width = pixel_values.shape
-
-    prompt_embeds, _, pooled_prompt_embeds, _ = pipeline.encode_prompt(
-        prompt=captions,
-        device=device,
-        num_images_per_prompt=1,
-        do_classifier_free_guidance=False,
+def encode_captions(pipeline, captions, device):
+    text_inputs = pipeline.tokenizer(
+        captions,
+        padding="max_length",
+        max_length=pipeline.tokenizer.model_max_length,
+        truncation=True,
+        return_tensors="pt",
     )
 
-    add_time_ids = pipeline._get_add_time_ids(
-        original_size=(height, width),
-        crops_coords_top_left=(0, 0),
-        target_size=(height, width),
-        dtype=prompt_embeds.dtype,
-        text_encoder_projection_dim=pooled_prompt_embeds.shape[-1],
-    ).to(device)
-    add_time_ids = add_time_ids.repeat(batch_size, 1)
+    input_ids = text_inputs.input_ids.to(device)
+    with torch.no_grad():
+        prompt_embeds = pipeline.text_encoder(input_ids)[0]
 
-    return prompt_embeds, {
-        "text_embeds": pooled_prompt_embeds,
-        "time_ids": add_time_ids,
-    }
+    return prompt_embeds
 
 
 def training_loop(
@@ -232,35 +217,49 @@ def training_loop(
     num_epochs=10,
     learning_rate=1e-4,
     gradient_accumulation_steps=1,
-    sample_every_steps=200,
-    checkpoint_every_steps=500,
+    sample_every_steps=1000,
+    checkpoint_every_steps=1000,
     sample_prompts=None,
     resume_from_checkpoint_path: Optional[str] = None,
     output_dir="../runs",
 ):
     """
-    Main training loop for SDXL LoRA fine-tuning.
+    Main training loop for SD1.5 LoRA fine-tuning.
     """
     if sample_prompts is None:
         sample_prompts = [
-            "Soft gradient lighting, warm sunset hues transitioning from amber to soft magenta, cozy and relaxing atmosphere, cinematic lighting, 8k resolution. ",
-            "Soft gradient lighting transitions from light yellow to pale pink, relaxing and immersive atmosphere for the retail cosmetics testing area. ",
-            "Warm and flowing light, soft gradient of yellow and light orange, intimate and solemn atmosphere, comfort of the dining space. ",
-            "Bright and warm tones, pale yellow and light orange, fresh and invigorating atmosphere, focus and vitality of the office space. "
+            "Soft gradient lighting transitions from vibrant pink to bright green, creating a dynamic and energetic atmosphere with warm undertones.",
+            "Soft gradient lighting transitions from pale yellow to gentle purple, creating a dreamy and ethereal atmosphere with subtle glowing highlights.",
+            "Soft gradient lighting transitions from lavender to warm pink with a subtle coral glow, creating a dreamy and serene atmosphere.",
+            "Soft gradient lighting transitions from warm peach to gentle mint, creating a serene and inviting atmosphere.",
+            
+            "Soft gradient lighting, warm sunset hues transitioning from amber to soft magenta, cozy and relaxing atmosphere.",
+            "Soft gradient lighting transitions from light yellow to pale pink, relaxing and immersive atmosphere, warm color harmony.",
+            "Warm and flowing light, soft gradient of yellow and light orange, intimate and solemn atmosphere.",
+            "Bright and warm tones, pale yellow and light orange, fresh and invigorating atmosphere.",
         ]
 
+    trainable_params = [param for param in pipeline.unet.parameters() if param.requires_grad]
     optimizer = torch.optim.AdamW(
-        pipeline.unet.parameters(),
+        trainable_params,
         lr=learning_rate,
+        betas=(0.9, 0.999),
+        weight_decay=0.01,
     )
-    
+
+    use_amp = torch.cuda.is_available()
+    amp_dtype = torch.bfloat16 if use_amp and torch.cuda.is_bf16_supported() else torch.float16
+    scaler = torch.cuda.amp.GradScaler(enabled=use_amp and amp_dtype == torch.float16)
+
     pipeline.vae.requires_grad_(False)
     pipeline.text_encoder.requires_grad_(False)
-    
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
     pipeline.to(device)
+    pipeline.unet.to(dtype=amp_dtype if use_amp else torch.float32)
     pipeline.vae.to(device=device, dtype=torch.float32)
     pipeline.vae.eval()
+    pipeline.text_encoder.eval()
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -278,36 +277,27 @@ def training_loop(
     progress_bar = tqdm(total=total_steps, initial=start_step, desc="Training", dynamic_ncols=True)
     loss_history = []
     global_step = start_step
-    
+
     for epoch in range(start_epoch_index, num_epochs):
         print(f"\n--- Epoch {epoch + 1}/{num_epochs} ---")
         epoch_loss = 0.0
         optimizer.zero_grad()
         pipeline.unet.train()
-        
+
         for step, batch in enumerate(train_dataloader):
             if epoch == start_epoch_index and step <= start_batch_idx:
                 continue
 
             pixel_values, captions = prepare_training_batch(batch, device)
-           
+
             with torch.no_grad():
                 latents = pipeline.vae.encode(pixel_values.float()).latent_dist.sample()
                 latents = latents * pipeline.vae.config.scaling_factor
                 latents = latents.to(dtype=pipeline.unet.dtype)
-            
-            encoder_hidden_states, added_cond_kwargs = build_sdxl_added_conditions(
-                pipeline=pipeline,
-                captions=captions,
-                pixel_values=pixel_values,
-                device=device,
-            )
-            encoder_hidden_states = encoder_hidden_states.to(dtype=pipeline.unet.dtype)
-            added_cond_kwargs = {
-                key: value.to(dtype=pipeline.unet.dtype) if isinstance(value, torch.Tensor) else value
-                for key, value in added_cond_kwargs.items()
-            }
-            
+
+            prompt_embeds = encode_captions(pipeline, captions, device)
+            prompt_embeds = prompt_embeds.to(dtype=pipeline.unet.dtype)
+
             noise = torch.randn_like(latents)
             bsz = latents.shape[0]
             timesteps = torch.randint(
@@ -317,47 +307,50 @@ def training_loop(
                 device=device,
                 dtype=torch.long,
             )
-            
+
             noisy_latents = pipeline.scheduler.add_noise(latents, noise, timesteps)
-            
-            with torch.autocast(device_type=device, dtype=torch.float16 if device == "cuda" else torch.float32):
+
+            with torch.autocast(device_type=device, dtype=amp_dtype if use_amp else torch.float32, enabled=use_amp):
                 model_pred = pipeline.unet(
                     noisy_latents,
                     timesteps,
-                    encoder_hidden_states=encoder_hidden_states,
-                    added_cond_kwargs=added_cond_kwargs,
+                    encoder_hidden_states=prompt_embeds,
                 ).sample
-            
-            loss = torch.nn.functional.mse_loss(model_pred, noise, reduction="mean")
+                loss = torch.nn.functional.mse_loss(model_pred, noise, reduction="mean")
+
             if not torch.isfinite(loss):
                 raise FloatingPointError(
-                    f"Non-finite loss detected at step {global_step}. "
-                    "Try lowering the learning rate, reducing image size, or keeping VAE encoding in float32."
+                    f"Non-finite loss detected at step {global_step}. Try lowering the learning rate or batch size."
                 )
-            
-            (loss / gradient_accumulation_steps).backward()
+
+            scaler.scale(loss / gradient_accumulation_steps).backward()
             if (step + 1) % gradient_accumulation_steps == 0 or (step + 1) == len(train_dataloader):
-                optimizer.step()
+                if use_amp:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=1.0)
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=1.0)
+                    optimizer.step()
                 optimizer.zero_grad()
-            
+
             loss_value = loss.detach().item()
             epoch_loss += loss_value
             loss_history.append((global_step, loss_value))
             global_step += 1
-            
+
             progress_bar.update(1)
             progress_bar.set_postfix(epoch=f"{epoch + 1}/{num_epochs}", loss=f"{loss_value:.4f}")
 
             if sample_every_steps > 0 and global_step % sample_every_steps == 0:
                 pipeline.unet.eval()
-                # For sampling, SDXL decode expects VAE dtype aligned with inference latents.
                 restore_vae_dtype = pipeline.vae.dtype
                 pipeline.vae.to(device=device, dtype=pipeline.unet.dtype)
                 try:
                     sample_images = generate_samples(pipeline=pipeline, prompts=sample_prompts)
                     save_samples(images=sample_images, output_dir=output_dir, global_step=global_step)
                 finally:
-                    # Keep VAE in float32 during training for numerical stability.
                     pipeline.vae.to(device=device, dtype=restore_vae_dtype)
                 pipeline.unet.train()
 
@@ -376,12 +369,12 @@ def training_loop(
                         "gradient_accumulation_steps": gradient_accumulation_steps,
                         "sample_every_steps": sample_every_steps,
                         "checkpoint_every_steps": checkpoint_every_steps,
+                        "lora_rank": getattr(pipeline.unet.peft_config["default"], "r", None) if hasattr(pipeline.unet, "peft_config") else None,
                     },
                 )
-        
+
         avg_loss = epoch_loss / len(train_dataloader)
         print(f"Epoch {epoch + 1} Average Loss: {avg_loss:.4f}")
-        
 
     save_checkpoint(
         path=Path(output_dir) / "checkpoints" / "final",
@@ -395,19 +388,20 @@ def training_loop(
             "gradient_accumulation_steps": gradient_accumulation_steps,
             "sample_every_steps": sample_every_steps,
             "checkpoint_every_steps": checkpoint_every_steps,
+            "lora_rank": getattr(pipeline.unet.peft_config["default"], "r", None) if hasattr(pipeline.unet, "peft_config") else None,
         },
     )
     save_loss_curve(loss_history, output_dir)
     progress_bar.close()
-    print(f"\nTraining complete!")
+    print("\nTraining complete!")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="SDXL LoRA fine-tuning for gradient lighting effects.")
+    parser = argparse.ArgumentParser(description="Stable Diffusion v1.5 LoRA fine-tuning for gradient lighting effects.")
     parser.add_argument(
         "--base-model",
-        default="stabilityai/stable-diffusion-xl-base-1.0",
-        help="Base SDXL model ID on HuggingFace Hub.",
+        default="runwayml/stable-diffusion-v1-5",
+        help="Base Stable Diffusion v1.5 model ID on HuggingFace Hub.",
     )
     parser.add_argument(
         "--use-hf-dataset",
@@ -421,12 +415,12 @@ def main():
     )
     parser.add_argument(
         "--jsonl-path",
-        default="../data/light_effect_captions.jsonl",
+        default="../../data/light_effect_captions.jsonl",
         help="Local JSONL dataset path (used if --use-hf-dataset not set).",
     )
     parser.add_argument(
         "--image-root",
-        default="../data",
+        default="../../data",
         help="Local image root directory.",
     )
     parser.add_argument(
@@ -454,15 +448,27 @@ def main():
         help="LoRA rank.",
     )
     parser.add_argument(
+        "--lora-alpha",
+        type=int,
+        default=32,
+        help="LoRA alpha scaling factor.",
+    )
+    parser.add_argument(
+        "--lora-dropout",
+        type=float,
+        default=0.1,
+        help="LoRA dropout.",
+    )
+    parser.add_argument(
         "--output-dir",
-        default="../runs",
+        default="../../runs",
         help="Output directory for trained LoRA weights.",
     )
     parser.add_argument(
         "--image-size",
         type=int,
-        default=768,
-        help="Image size for training (SDXL typically uses 768 or 1024).",
+        default=512,
+        help="Image size for training.",
     )
     parser.add_argument(
         "--sample-every-steps",
@@ -488,8 +494,13 @@ def main():
         help="Path to a checkpoint directory created by save_checkpoint.",
     )
     args = parser.parse_args()
-    
-    pipeline = setup_sdxl_lora(args.base_model, lora_rank=args.lora_rank)
+
+    pipeline = setup_sd15_lora(
+        args.base_model,
+        lora_rank=args.lora_rank,
+        lora_alpha=args.lora_alpha,
+        lora_dropout=args.lora_dropout,
+    )
 
     train_dataloader = build_train_dataloader(
         use_hf_dataset=args.use_hf_dataset,
@@ -501,10 +512,11 @@ def main():
         shuffle=True,
         num_workers=0,
     )
-    
+
     start_time = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = Path(args.output_dir) / f"sdxl_lora_{start_time}"
+    output_dir = Path(args.output_dir) / f"lora_{start_time}"
     output_dir.mkdir(parents=True, exist_ok=True)
+
     training_loop(
         pipeline=pipeline,
         train_dataloader=train_dataloader,

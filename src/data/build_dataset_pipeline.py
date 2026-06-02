@@ -17,6 +17,7 @@ def build_dataset(
     height: int = 768,
     seed_one: int = 42,
     seed_more: int = 43,
+    caption_mode: str = "controlled"
 ) -> int:
     images_root = root_dir / "images"
     captions_path = root_dir / "light_effect_captions.jsonl"
@@ -40,7 +41,7 @@ def build_dataset(
         Image.fromarray(img).save(save_path)
 
     print("===== Step 2: Exporting captions =====")
-    caption_total = export_captions(images_root, captions_path)
+    caption_total = export_captions(images_root, captions_path, caption_mode=caption_mode)
 
     print(f"Done. Generated {total_images} images and wrote {caption_total} caption records to {captions_path}")
     return caption_total
@@ -55,6 +56,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--height", type=int, default=768, help="Image height in pixels.")
     parser.add_argument("--seed-one", type=int, default=42, help="Random seed for simulate_graph_one.")
     parser.add_argument("--seed-more", type=int, default=43, help="Random seed for simulate_graph_more.")
+    parser.add_argument("--caption-mode", type=str, choices=["controlled", "free"], default="controlled", help="Caption generation mode.")
     return parser.parse_args()
 
 
@@ -68,6 +70,7 @@ def main() -> None:
         height=args.height,
         seed_one=args.seed_one,
         seed_more=args.seed_more,
+        caption_mode=args.caption_mode
     )
 
 

@@ -1,4 +1,5 @@
 import base64
+import re
 import json
 import mimetypes
 import os
@@ -11,25 +12,125 @@ from openai import OpenAI
 load_dotenv()
 
 
-def build_system_prompt():
+FORBIDDEN_SCENE_TERMS = [
+    "living room",
+    "dining room",
+    "bedroom",
+    "kitchen",
+    "bathroom",
+    "hallway",
+    "interior",
+    "room",
+    "furniture",
+    "sofa",
+    "chair",
+    "bed",
+    "table",
+    "lamp",
+    "window",
+    "curtain",
+    "house",
+    "office",
+    "space",
+    "scene",
+    "store",
+    "shop",
+    "retail",
+    "cosmetics",
+    "testing",
+    "gallery",
+    "stage",
+    "corridor",
+]
+
+
+def build_system_prompt(mode="controlled"):
+    if mode == "free":
+        return (
+            "You are a lighting-effect image annotation assistant. "
+            "Write one concise English caption that can be directly used as a lighting prompt. "
+            "Focus on color, gradient, glow, mood and style. "
+            "Do not mention rooms, furniture, buildings, people, or any real-world scene. "
+            "Do not use the words black, dark, or shadow. "
+            "Return plain text only, not JSON. "
+        )
+
     return (
-        "You are a lighting-effect image annotation assistant. "
-        "Write one concise English caption that can be directly used as a lighting prompt. "
-        "Focus on color, gradient, glow, mood, style and the most suitable real-world scene for this lighting. "
-        "Use bright warm tones only. "
+        "You are a strict lighting-effect image annotation assistant. "
+        "Return JSON only, with exactly these keys: primary_color, secondary_color, transition, mood, detail. "
+        "Use short, concrete phrases. "
+        "Choose colors from concise visual descriptions only. "
+        "Never mention rooms, furniture, buildings, people, objects, or any real-world scene. "
+        "Keep transition to a short phrase like 'soft gradient' or 'smooth blend'. "
+        "Keep mood to a short phrase like 'calm', 'dreamy', 'serene', 'fresh', 'energetic', or 'warm'. "
+        "Keep detail to a short phrase like 'soft glow', 'diffuse light', or 'smooth texture'. "
         "Do not use the words black, dark, or shadow. "
-        "Return plain text only, not JSON. "
-        "Examples: Soft gradient lighting, warm sunset hues transitioning from amber to soft magenta, cozy and relaxing atmosphere, cinematic lighting, 8k resolution. "
-        "Soft gradient lighting transitions from light yellow to pale pink, relaxing and immersive atmosphere for the retail cosmetics testing area. "
-        "Warm and flowing light, soft gradient of yellow and light orange, intimate and solemn atmosphere, comfort of the dining space. "
-        "Bright and warm tones, pale yellow and light orange, fresh and invigorating atmosphere, focus and vitality of the office space. "
+        "Do not add extra keys. "
+        "Example: {\"primary_color\": \"warm amber\", \"secondary_color\": \"soft magenta\", \"transition\": \"soft gradient\", \"mood\": \"calm\", \"detail\": \"soft glow\"}. "
     )
 
 
 def build_user_prompt(image_name):
     return (
-        f"Describe the lighting image '{image_name}' in one concise English sentence. "
+        f"Describe the lighting image '{image_name}' in a controlled, scene-free way. "
+        "If JSON is requested, use only the allowed keys and keep the values short. "
     )
+
+
+def build_caption_from_schema(schema):
+    primary_color = str(schema.get("primary_color", "warm amber")).strip().lower()
+    secondary_color = str(schema.get("secondary_color", "soft magenta")).strip().lower()
+    transition = str(schema.get("transition", "soft gradient")).strip().lower()
+    mood = str(schema.get("mood", "calm")).strip().lower()
+    detail = str(schema.get("detail", "soft glow")).strip().lower()
+
+    transition = re.sub(r"[^a-z0-9\- ]+", "", transition).strip() or "soft gradient"
+    detail = re.sub(r"[^a-z0-9\- ]+", "", detail).strip() or "soft glow"
+
+    return (
+        f"Abstract light effect, {transition} from {primary_color} to {secondary_color}, "
+        f"{mood} atmosphere, {detail}, no room, no furniture, no objects."
+    )
+
+
+def sanitize_caption(text):
+    # remove common code fences and inline code markers
+    caption = re.sub(r"```(?:json)?\s*|\s*```", "", text, flags=re.IGNORECASE).strip()
+    caption = re.sub(r"`", "", caption)
+    caption = re.sub(r"\s+", " ", caption).strip()
+    if not caption:
+        return "Abstract light effect, soft gradient from warm amber to soft magenta, calm atmosphere, soft glow, no room, no furniture, no objects."
+
+    lowered = caption.lower()
+    for term in FORBIDDEN_SCENE_TERMS:
+        lowered = lowered.replace(term, "")
+
+    lowered = re.sub(r"\b(black|dark|shadow)\b", "", lowered)
+    lowered = re.sub(r"\s+", " ", lowered).strip(" ,.;:")
+
+    if not lowered:
+        lowered = "abstract light effect, soft gradient, calm atmosphere, soft glow"
+
+    if "room" not in lowered and "furniture" not in lowered and "objects" not in lowered:
+        lowered = f"{lowered}, no room, no furniture, no objects"
+
+    lowered = lowered[0].upper() + lowered[1:] if lowered else lowered
+    return lowered
+
+
+def extract_json_from_text(text):
+    """Try to extract a JSON object from text. Returns the JSON string or None."""
+    # first look for ```json { ... } ``` blocks
+    m = re.search(r"```json\s*(\{.*?\})\s*```", text, flags=re.S | re.IGNORECASE)
+    if m:
+        return m.group(1)
+
+    # next look for any { ... } that looks like a JSON object
+    m2 = re.search(r"(\{\s*\"?[a-zA-Z0-9_\- ]+\"?\s*:\s*[^}]+\})", text, flags=re.S)
+    if m2:
+        return m2.group(1)
+
+    return None
 
 
 def image_to_data_url(image_path):
@@ -41,7 +142,7 @@ def image_to_data_url(image_path):
     return f"data:{mime_type};base64,{encoded}"
 
 
-def call_vlm_for_effect(image_path):
+def call_vlm_for_effect(image_path, caption_mode="controlled"):
     model_id = os.getenv("VLM_MODEL_ID", "qwen-vl-max-latest")
     api_key = os.getenv("DASHSCOPE_API_KEY")
     base_url = os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
@@ -55,7 +156,7 @@ def call_vlm_for_effect(image_path):
     payload = {
         "model": model_id,
         "messages": [
-            {"role": "system", "content": build_system_prompt()},
+            {"role": "system", "content": build_system_prompt(caption_mode)},
             {
                 "role": "user",
                 "content": [
@@ -73,7 +174,29 @@ def call_vlm_for_effect(image_path):
         temperature=payload["temperature"],
     )
 
-    return response.choices[0].message.content.strip(), model_id
+    raw_caption = response.choices[0].message.content.strip()
+
+    if caption_mode == "free":
+        return sanitize_caption(raw_caption), model_id
+
+    # Try to extract a JSON object from the VLM response (handles ```json {...}``` blocks)
+    json_candidate = extract_json_from_text(raw_caption)
+    if json_candidate:
+        try:
+            schema = json.loads(json_candidate)
+            if isinstance(schema, dict):
+                return build_caption_from_schema(schema), model_id
+        except Exception:
+            pass
+
+    try:
+        schema = json.loads(raw_caption)
+        if isinstance(schema, dict):
+            return build_caption_from_schema(schema), model_id
+    except Exception:
+        pass
+
+    return sanitize_caption(raw_caption), model_id
 
 
 def list_images(image_dir):
@@ -87,14 +210,14 @@ def build_record(image_path, caption, root_dir):
     }
 
 
-def export_captions(image_dir, output_path):
+def export_captions(image_dir, output_path, caption_mode="controlled"):
     images = list_images(image_dir)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     count = 0
     with output_path.open("w", encoding="utf-8") as handle:
         for image_path in images:
-            caption, model_id = call_vlm_for_effect(image_path)
+            caption, model_id = call_vlm_for_effect(image_path, caption_mode=caption_mode)
             record = build_record(image_path, caption, image_dir.parent)
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
             count += 1
@@ -105,10 +228,10 @@ def export_captions(image_dir, output_path):
 
 def main():
 
-    image_dir = Path("../../data/trial/images")
-    output_path = Path("../../data/trial/light_effect_captions.jsonl")
+    image_dir = Path("../../data/images")
+    output_path = Path("../../data/light_effect_captions.jsonl")
 
-    total = export_captions(image_dir, output_path)
+    total = export_captions(image_dir, output_path, caption_mode="controlled")
     print(f"Done. Wrote {total} caption records to {output_path}")
 
 
