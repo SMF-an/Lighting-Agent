@@ -121,7 +121,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--checkpoint-dir",
-        default="../../runs/full_20260524_124658/checkpoints/final",
+        default="../../runs/full_color_high_freq_text/checkpoints/final",
         help="Path to checkpoint directory (contains either lora_adapter/ or model/unet_state_dict.pt).",
     )
     parser.add_argument(

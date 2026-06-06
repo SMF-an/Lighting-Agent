@@ -373,15 +373,14 @@ def training_loop(
     Main training loop for SD1.5 full UNet fine-tuning.
     """
     sample_prompts = [
-        "Soft gradient lighting transitions from vibrant pink to bright green, creating a dynamic and energetic atmosphere with warm undertones.",
-        "Soft gradient lighting transitions from pale yellow to gentle purple, creating a dreamy and ethereal atmosphere with subtle glowing highlights.",
-        "Soft gradient lighting transitions from lavender to warm pink with a subtle coral glow, creating a dreamy and serene atmosphere.",
-        "Soft gradient lighting transitions from warm peach to gentle mint, creating a serene and inviting atmosphere.",
-            
-        "Soft gradient lighting, warm sunset hues transitioning from amber to soft magenta, cozy and relaxing atmosphere.",
-        "Soft gradient lighting transitions from light yellow to pale pink, relaxing and immersive atmosphere, warm color harmony.",
-        "Warm and flowing light, soft gradient of yellow and light orange, intimate and solemn atmosphere.",
-        "Bright and warm tones, pale yellow and light orange, fresh and invigorating atmosphere.",
+        "Abstract light effect, uniform from purple to bright yellow-green, energetic atmosphere, smooth texture, no room, no furniture, no objects.",
+        "Abstract light effect, smooth blend from soft blue to lime green, calm atmosphere, diffuse light, no room, no furniture, no objects.",
+        "Abstract light effect, uniform from bright teal to cool blue, balanced atmosphere, diffuse light, no room, no furniture, no objects.",
+        "Abstract light effect, smooth blend from soft teal to gentle cyan, balanced atmosphere, smooth texture, no room, no furniture, no objects.",
+        "Abstract light effect, uniform from light gray to light periwinkle, warm atmosphere, subtle glow, no room, no furniture, no objects.",
+        "Abstract light effect, smooth blend from cool teal to gentle yellow, energetic atmosphere, diffuse glow, no room, no furniture, no objects.",
+        "Abstract light effect, smooth blend from light periwinkle to bright teal, fresh atmosphere, soft blend, no room, no furniture, no objects.",
+        "Abstract light effect, smooth blend from soft purple to warm gold, fresh atmosphere, diffuse light, no room, no furniture, no objects.",
     ]
 
     optimizer_param_groups = [

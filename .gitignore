@@ -2,6 +2,7 @@
 /result/
 /runs/
 report/
+lecture/
 *.pptx
 src/.env
 __pycache__

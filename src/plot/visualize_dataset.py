@@ -80,12 +80,12 @@ def parse_args():
     )
     parser.add_argument(
         "--jsonl-path",
-        default="../data/light_effect_captions.jsonl",
+        default="../../data/light_effect_captions.jsonl",
         help="Local JSONL file containing image-caption pairs.",
     )
     parser.add_argument(
         "--image-root",
-        default="../data",
+        default="../../data",
         help="Local image root used to resolve relative image paths.",
     )
     parser.add_argument(
@@ -108,7 +108,7 @@ def parse_args():
     )
     parser.add_argument(
         "--output",
-        default="../result/dataset_preview.png",
+        default="../../result/dataset_preview.png",
         help="Output image path.",
     )
     parser.add_argument(

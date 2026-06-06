@@ -103,8 +103,8 @@ def build_figure(image_path: Path, output_path: Path, cutoff: float = 0.03) -> N
 
 if __name__ == "__main__":
     
-    image_path = Path("../result/eval/pretrain/samples/Abstract_light_effect_smooth_blend_from_warm_red_to_magenta_fresh_atmosphere_soft_glow_no_room_no_furniture_no_objects/sample_001.png")
-    output_path = Path("../result/frequency_transform_comparison.png")
+    image_path = Path("../../data/images/1008.png")
+    output_path = Path("../../result/frequency_transform_comparison.png")
 
     if not image_path.exists():
         raise FileNotFoundError(f"Image not found: {image_path}")
